@@ -27,7 +27,8 @@
 static int lcec_deasda_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_reg_t *pdo_entry_regs);
 
 static lcec_typelist_t types[]={
-  { "DeASDA", LCEC_DELTA_VID, 0x10305070, LCEC_DEASDA_PDOS, 0, NULL, lcec_deasda_init},
+  { "DeASDA2", LCEC_DELTA_VID, 0x10305070, LCEC_DEASDA_PDOS, 0, NULL, lcec_deasda_init},
+  { "DeASDA3", LCEC_DELTA_VID, 0x00006010, LCEC_DEASDA_PDOS, 0, NULL, lcec_deasda_init},
   { NULL },
 };
 
@@ -65,11 +66,11 @@ typedef struct {
   hal_bit_t *enable;
   hal_bit_t *fault_reset;
   hal_bit_t *halt;
-  hal_float_t *vel_cmd;
-
+  hal_float_t *pos_cmd;
   hal_float_t pos_scale;
   hal_float_t extenc_scale;
   hal_u32_t pprev;
+
   hal_u32_t fault_autoreset_cycles;
   hal_u32_t fault_autoreset_retries;
 
@@ -84,7 +85,7 @@ typedef struct {
   unsigned int currvel_pdo_os;
   unsigned int extenc_pdo_os;
   unsigned int control_pdo_os;
-  unsigned int cmdvel_pdo_os;
+  unsigned int cmdpos_pdo_os;
 
   hal_bit_t last_switch_on;
   hal_bit_t internal_fault;
@@ -118,7 +119,7 @@ static const lcec_pindesc_t slave_pins[] = {
   { HAL_BIT, HAL_IN, offsetof(lcec_deasda_data_t, enable), "%s.%s.%s.srv-enable" },
   { HAL_BIT, HAL_IN, offsetof(lcec_deasda_data_t, fault_reset), "%s.%s.%s.srv-fault-reset" },
   { HAL_BIT, HAL_IN, offsetof(lcec_deasda_data_t, halt), "%s.%s.%s.srv-halt" },
-  { HAL_FLOAT, HAL_IN, offsetof(lcec_deasda_data_t, vel_cmd), "%s.%s.%s.srv-vel-cmd" },
+  { HAL_FLOAT, HAL_IN, offsetof(lcec_deasda_data_t, pos_cmd), "%s.%s.%s.srv-pos-cmd" },
   { HAL_TYPE_UNSPECIFIED, HAL_DIR_UNSPECIFIED, -1, NULL }
 };
 
@@ -140,7 +141,7 @@ static ec_pdo_entry_info_t lcec_deasda_in[] = {
 
 static ec_pdo_entry_info_t lcec_deasda_out[] = {
    {0x6040, 0x00, 16}, // Control Word
-   {0x60FF, 0x00, 32}  // Target Velocity
+   {0x607A, 0x00, 32}  // Target Velocity
 };
 
 static ec_pdo_info_t lcec_deasda_pdos_out[] = {
@@ -184,8 +185,8 @@ static int lcec_deasda_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_
   slave->hal_data = hal_data;
 
   // set to cyclic synchronous velocity mode
-  if (ecrt_slave_config_sdo8(slave->config, 0x6060, 0x00, 9) != 0) {
-    rtapi_print_msg (RTAPI_MSG_ERR, LCEC_MSG_PFX "fail to configure slave %s.%s sdo velo mode\n", master->name, slave->name);
+  if (ecrt_slave_config_sdo8(slave->config, 0x6060, 0x00, 8) != 0) {
+    rtapi_print_msg (RTAPI_MSG_ERR, LCEC_MSG_PFX "fail to configure slave %s.%s sdo csp mode\n", master->name, slave->name);
   }
 
   // set interpolation time period
@@ -208,7 +209,7 @@ static int lcec_deasda_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_
   LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6064, 0x00, &hal_data->currpos_pdo_os, NULL);
   LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x2511, 0x00, &hal_data->extenc_pdo_os, NULL);
   LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6040, 0x00, &hal_data->control_pdo_os, NULL);
-  LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x60FF, 0x00, &hal_data->cmdvel_pdo_os, NULL);
+  LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x607A, 0x00, &hal_data->cmdpos_pdo_os, NULL);
 
   // export pins
   if ((err = lcec_pin_newf_list(hal_data, slave_pins, LCEC_MODULE_NAME, master->name, slave->name)) != 0) {
@@ -350,8 +351,9 @@ static void lcec_deasda_write(struct lcec_slave *slave, long period) {
   lcec_deasda_data_t *hal_data = (lcec_deasda_data_t *) slave->hal_data;
   uint8_t *pd = master->process_data;
   uint16_t control;
-  double speed_raw;
+  // double speed_raw;
   int switch_on_edge;
+  int32_t pos_puu; 
 
   // check for enable edge
   switch_on_edge = *(hal_data->switch_on) && !hal_data->last_switch_on;
@@ -395,17 +397,10 @@ static void lcec_deasda_write(struct lcec_slave *slave, long period) {
   }
   EC_WRITE_U16(&pd[hal_data->control_pdo_os], control);
 
-  // calculate rpm command
-  *(hal_data->vel_rpm) = *(hal_data->vel_cmd) * hal_data->pos_scale_rcpt * DEASDA_RPM_MUL;
-
-  // set RPM
-  speed_raw = *(hal_data->vel_rpm) * DEASDA_RPM_RCPT;
-  if (speed_raw > (double)0x7fffffff) {
-    speed_raw = (double)0x7fffffff;
-  }
-  if (speed_raw < (double)-0x7fffffff) {
-    speed_raw = (double)-0x7fffffff;
-  }
-  EC_WRITE_S32(&pd[hal_data->cmdvel_pdo_os], (int32_t)speed_raw);
+  // ASDA Drives exprect target Position in PUU (Pulse per User Unit)
+  // See https://www.deltaww.com/en-US/FAQ/228
+  // Calculation accordingly based on pprev and pos_scale (i.e. pitch of ball screw)
+  pos_puu = (int32_t) (*(hal_data->pos_cmd) * hal_data->pprev / hal_data->pos_scale);
+  EC_WRITE_S32(&pd[hal_data->cmdpos_pdo_os], pos_puu);
 }
 
