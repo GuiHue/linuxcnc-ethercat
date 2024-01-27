@@ -20,6 +20,7 @@
 /// @brief Driver for Beckhoff EL3xxx Analog input modules
 
 #include "../lcec.h"
+#include "lcec_class_ain.h"
 
 // TODO(scottlaird): add support for additional EL31xx operating modes, as per
 //   https://download.beckhoff.com/download/Document/io/ethercat-terminals/el31xxen.pdf#page=251
@@ -214,96 +215,18 @@ static lcec_typelist_t types[] = {
 };
 ADD_TYPES(types)
 
-/// @brief Data for a single analog channel.
-typedef struct {
-  hal_bit_t *overrange;   ///< Device reading is over-range.
-  hal_bit_t *underrange;  ///< Device reading is under-range.
-  hal_bit_t *error;       ///< Device is in an error state.
-  hal_bit_t *sync_err;    ///< Device has a sync error.
-  hal_s32_t *raw_val;     ///< The raw value read from the device.
-  hal_float_t *scale;     ///< The scale used to convert `raw_val` into `val`.
-  hal_float_t *bias;      ///< The offset used to convert `raw_val` into `val`.
-  hal_float_t *val;       ///< The final result returned to LinuxCNC.
-  unsigned int ovr_pdo_os;
-  unsigned int ovr_pdo_bp;
-  unsigned int udr_pdo_os;
-  unsigned int udr_pdo_bp;
-  unsigned int error_pdo_os;
-  unsigned int error_pdo_bp;
-  unsigned int sync_err_pdo_os;
-  unsigned int sync_err_pdo_bp;
-  unsigned int val_pdo_os;
-  unsigned int is_unsigned;  ///< Sensor type is unsigned, such as resistance or temperature sensors.
-} lcec_el3xxx_chan_t;
-
-/// @brief List of HAL pins for analog devices with sync support.
-static const lcec_pindesc_t slave_pins_sync[] = {
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, error), "%s.%s.%s.ain-%d-error"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, sync_err), "%s.%s.%s.ain-%d-sync-err"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, overrange), "%s.%s.%s.ain-%d-overrange"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, underrange), "%s.%s.%s.ain-%d-underrange"},
-    {HAL_S32, HAL_OUT, offsetof(lcec_el3xxx_chan_t, raw_val), "%s.%s.%s.ain-%d-raw"},
-    {HAL_FLOAT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, val), "%s.%s.%s.ain-%d-val"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, scale), "%s.%s.%s.ain-%d-scale"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, bias), "%s.%s.%s.ain-%d-bias"},
-    {HAL_TYPE_UNSPECIFIED, HAL_DIR_UNSPECIFIED, -1, NULL},
-};
-
-/// @brief List of HAL pins for analog devices without sync support.
-static const lcec_pindesc_t slave_pins_nosync[] = {
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, error), "%s.%s.%s.ain-%d-error"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, overrange), "%s.%s.%s.ain-%d-overrange"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, underrange), "%s.%s.%s.ain-%d-underrange"},
-    {HAL_S32, HAL_OUT, offsetof(lcec_el3xxx_chan_t, raw_val), "%s.%s.%s.ain-%d-raw"},
-    {HAL_FLOAT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, val), "%s.%s.%s.ain-%d-val"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, scale), "%s.%s.%s.ain-%d-scale"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, bias), "%s.%s.%s.ain-%d-bias"},
-    {HAL_TYPE_UNSPECIFIED, HAL_DIR_UNSPECIFIED, -1, NULL},
-};
-
-/// @brief List of HAL pins for temperature sensors.
-static const lcec_pindesc_t slave_pins_temperature[] = {
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, error), "%s.%s.%s.temp-%d-error"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, overrange), "%s.%s.%s.temp-%d-overrange"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, underrange), "%s.%s.%s.temp-%d-underrange"},
-    {HAL_S32, HAL_OUT, offsetof(lcec_el3xxx_chan_t, raw_val), "%s.%s.%s.temp-%d-raw"},
-    {HAL_FLOAT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, val), "%s.%s.%s.temp-%d-temperature"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, scale), "%s.%s.%s.temp-%d-scale"},  // deleteme
-    {HAL_TYPE_UNSPECIFIED, HAL_DIR_UNSPECIFIED, -1, NULL},
-};
-
-/// @brief List of HAL pins for pressure sensors.
-static const lcec_pindesc_t slave_pins_pressure[] = {
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, error), "%s.%s.%s.press-%d-error"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, overrange), "%s.%s.%s.press-%d-overrange"},
-    {HAL_BIT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, underrange), "%s.%s.%s.press-%d-underrange"},
-    {HAL_S32, HAL_OUT, offsetof(lcec_el3xxx_chan_t, raw_val), "%s.%s.%s.press-%d-raw"},
-    {HAL_FLOAT, HAL_OUT, offsetof(lcec_el3xxx_chan_t, val), "%s.%s.%s.press-%d-pressure"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, scale), "%s.%s.%s.press-%d-scale"},
-    {HAL_FLOAT, HAL_IO, offsetof(lcec_el3xxx_chan_t, bias), "%s.%s.%s.press-%d-bias"},
-    {HAL_TYPE_UNSPECIFIED, HAL_DIR_UNSPECIFIED, -1, NULL},
-};
-
-/// @brief Data for an analog input device.
-typedef struct {
-  uint32_t channels;                               ///< The number of channels this device supports.
-  lcec_el3xxx_chan_t chans[LCEC_EL3XXX_MAXCHANS];  ///< Data for each channel.
-} lcec_el3xxx_data_t;
-
-static void lcec_el3xxx_read_temp(struct lcec_slave *slave, long period);
 static void lcec_el3xxx_read(struct lcec_slave *slave, long period);
 static const temp_sensor_t *sensor_type(char *sensortype);
 static const temp_resolution_t *sensor_resolution(char *sensorresolution);
 static const temp_wires_t *sensor_wires(char *sensorwires);
+static int set_sensor_type(lcec_slave_t *slave, char *sensortype, lcec_class_ain_channel_t *chan, int idx, int sidx);
+static int set_resolution(lcec_slave_t *slave, char *resolution_name, lcec_class_ain_channel_t *chan, int idx, int sidx);
+static int set_wires(lcec_slave_t *slave, char *wires_name, lcec_class_ain_channel_t *chan, int idx, int sidx);
 
 /// @brief Initialize an EL3xxx device.
 static int lcec_el3xxx_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_reg_t *pdo_entry_regs) {
   lcec_master_t *master = slave->master;
-  lcec_el3xxx_data_t *hal_data;
-  lcec_el3xxx_chan_t *chan;
-  int i;
-  int err;
-  const lcec_pindesc_t *slave_pins;
+  lcec_class_ain_channels_t *hal_data;
   uint64_t flags;
 
   flags = slave->flags;
@@ -312,138 +235,52 @@ static int lcec_el3xxx_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_
   rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "- slave is %p\n", slave);
   rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "- pdo_entry_regs is %p\n", pdo_entry_regs);
 
-  // initialize settings that vary per bitdepth
-  if (flags & F_TEMPERATURE) {
-    slave->proc_read = lcec_el3xxx_read_temp;
-  } else {
-    slave->proc_read = lcec_el3xxx_read;
-  }
-
-  // alloc hal memory
-  if ((hal_data = hal_malloc(sizeof(lcec_el3xxx_data_t))) == NULL) {
+  hal_data = lcec_ain_allocate_channels(INPORTS(slave->flags));
+  if (hal_data == NULL) {
     rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "hal_malloc() for slave %s.%s failed\n", master->name, slave->name);
     return -EIO;
   }
-  memset(hal_data, 0, sizeof(lcec_el3xxx_data_t));
   slave->hal_data = hal_data;
-  hal_data->channels = INPORTS(slave->flags);
 
-  rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "- setting up pins\n");
+  for (int i = 0; i < hal_data->count; i++) {
+    lcec_class_ain_options_t *options = lcec_ain_options();
+    options->has_sync = flags & F_SYNC;
+    options->is_temperature = flags & F_TEMPERATURE;
+    options->is_pressure = flags & F_PRESSURE;
 
-  // initialize pins
-  for (i = 0; i < hal_data->channels; i++) {
-    chan = &hal_data->chans[i];
-    rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "- setting up channel %d (%p)\n", i, chan);
+    hal_data->channels[i] = lcec_ain_register_channel(&pdo_entry_regs, slave, i, 0x6000 + (i << 4), options);
+    if (hal_data->channels[i] == NULL) return -EIO;
+  }
 
-    // initialize POD entries
-    LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6000 + (i << 4), 0x01, &chan->udr_pdo_os, &chan->udr_pdo_bp);
-    LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6000 + (i << 4), 0x02, &chan->ovr_pdo_os, &chan->ovr_pdo_bp);
-    LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6000 + (i << 4), 0x07, &chan->error_pdo_os, &chan->error_pdo_bp);
-    if (flags & F_SYNC) {
-      // Only EL31xx devices have this PDO, if we try to initialize it
-      // with 30xxs, then we get a PDO error and fail out.
-      LCEC_PDO_INIT(
-          pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6000 + (i << 4), 0x0E, &chan->sync_err_pdo_os, &chan->sync_err_pdo_bp);
-    }
-    LCEC_PDO_INIT(pdo_entry_regs, slave->index, slave->vid, slave->pid, 0x6000 + (i << 4), 0x11, &chan->val_pdo_os, NULL);
+  slave->proc_read = lcec_el3xxx_read;
 
-    // export pins
-    if (flags & F_TEMPERATURE) {
-      slave_pins = slave_pins_temperature;
-    } else if (flags & F_PRESSURE) {
-      slave_pins = slave_pins_pressure;
-    } else if (flags & F_SYNC)
-      slave_pins = slave_pins_sync;
-    else
-      slave_pins = slave_pins_nosync;
-
-    if ((err = lcec_pin_newf_list(chan, slave_pins, LCEC_MODULE_NAME, master->name, slave->name, i)) != 0) {
-      rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "lcec_pin_newf_list() for slave %s.%s failed: %d\n", master->name, slave->name, err);
-      return err;
-    }
-
-    // initialize scale
-    if (flags & F_TEMPERATURE) {
-      *(chan->scale) = 0.1;
-    } else {
-      *(chan->scale) = 1.0;
-    }
-
-    chan->is_unsigned = 0;
+  // handle modParams
+  for (int i = 0; i < hal_data->count; i++) {
+    lcec_class_ain_channel_t *chan = hal_data->channels[i];
 
     // Handle modparams
     if (flags & F_TEMPERATURE) {
       LCEC_CONF_MODPARAM_VAL_T *pval;
 
-      // Handle <modParam> entries from the XML.
-
       // <modParam name="chXSensor" value="???"/>
-      rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "  - checking modparam sensor for %s %d\n", slave->name, i);
       pval = lcec_modparam_get(slave, LCEC_EL3XXX_MODPARAM_SENSOR + i);
       if (pval != NULL) {
-        rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "    - found sensor param\n");
-        temp_sensor_t const *sensor;
-
-        sensor = sensor_type(pval->str);
-        if (sensor != NULL) {
-          rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "    - setting sensor for %s %d to %d\n", slave->name, i, sensor->value);
-          *(chan->scale) = sensor->scale;
-          chan->is_unsigned = sensor->is_unsigned;
-
-          if (lcec_write_sdo16(slave, 0x8000 + (i << 4), 0x19, sensor->value) != 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure slave %s.%s sdo sensor!\n", master->name, slave->name);
-            return -1;
-          }
-        } else {
-          rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown sensor type \"%s\" for slave %s.%s channel %d!\n", pval->str, master->name,
-              slave->name, i);
-          return -1;
-        }
+        if (set_sensor_type(slave, pval->str, chan, 0x8000 + (i << 4), 0x19) != 0)
+          return -1;  // set_sensor_type logs an error message so we don't have to.
       }
 
       // <modParam name="chXResolution" value="???"/>
-      rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "  - checking modparam resolution for %s %d\n", slave->name, i);
       pval = lcec_modparam_get(slave, LCEC_EL3XXX_MODPARAM_RESOLUTION + i);
       if (pval != NULL) {
-        rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "    - found resolution param\n");
-        temp_resolution_t const *resolution;
-
-        resolution = sensor_resolution(pval->str);
-        if (resolution != NULL) {
-          rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "    - setting resolution for %s %d to %d\n", slave->name, i, resolution->value);
-          *(chan->scale) = *(chan->scale) * resolution->scale_multiplier;
-
-          if (lcec_write_sdo8(slave, 0x8000 + (i << 4), 0x2, resolution->value) != 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure slave %s.%s sdo resolution!\n", master->name, slave->name);
-            return -1;
-          }
-        } else {
-          rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown resolution \"%s\" for slave %s.%s channel %d!\n", pval->str, master->name,
-              slave->name, i);
-          return -1;
-        }
+        if (set_resolution(slave, pval->str, chan, 0x8000 + (i << 4), 0x2) != 0)
+          return -1;  // set_resolution logs an error message so we don't have to.
       }
 
       // <modParam name="chXWires", value="???"/>
-      rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "   - checking modparam wires for %s %d\n", slave->name, i);
       pval = lcec_modparam_get(slave, LCEC_EL3XXX_MODPARAM_WIRES + i);
       if (pval != NULL) {
-        rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "     - found wires param\n");
-        temp_wires_t const *wires;
-
-        wires = sensor_wires(pval->str);
-        if (wires != NULL) {
-          rtapi_print_msg(RTAPI_MSG_DBG, LCEC_MSG_PFX "      - setting wires for %s %d to %d\n", slave->name, i, wires->value);
-
-          if (lcec_write_sdo16(slave, 0x8000 + (i << 4), 0x1a, wires->value) != 0) {
-            rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure slave %s.%s sdo wires!\n", master->name, slave->name);
-            return -1;
-          }
-        } else {
-          rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown wire setting \"%s\" for slave %s.%s channel %d!\n", pval->str, master->name,
-              slave->name, i);
-          return -1;
-        }
+        if (set_wires(slave, pval->str, chan, 0x8000 + (i << 4), 0x1a) != 0)
+          return -1;  // set_resolution logs an error message so we don't have to.
       }
     }
   }
@@ -454,72 +291,14 @@ static int lcec_el3xxx_init(int comp_id, struct lcec_slave *slave, ec_pdo_entry_
 
 /// @brief Read values from the device.
 static void lcec_el3xxx_read(struct lcec_slave *slave, long period) {
-  lcec_master_t *master = slave->master;
-  lcec_el3xxx_data_t *hal_data = (lcec_el3xxx_data_t *)slave->hal_data;
-  uint8_t *pd = master->process_data;
-  int i;
-  lcec_el3xxx_chan_t *chan;
-  int16_t value;
-  int mask = 0x7fff;
+  lcec_class_ain_channels_t *hal_data = (lcec_class_ain_channels_t *)slave->hal_data;
 
   // wait for slave to be operational
   if (!slave->state.operational) {
     return;
   }
 
-  // check inputs
-  for (i = 0; i < hal_data->channels; i++) {
-    chan = &hal_data->chans[i];
-
-    // update state
-    // update state
-    *(chan->overrange) = EC_READ_BIT(&pd[chan->ovr_pdo_os], chan->ovr_pdo_bp);
-    *(chan->underrange) = EC_READ_BIT(&pd[chan->udr_pdo_os], chan->udr_pdo_bp);
-    *(chan->error) = EC_READ_BIT(&pd[chan->error_pdo_os], chan->error_pdo_bp);
-    if (slave->flags & F_SYNC) *(chan->sync_err) = EC_READ_BIT(&pd[chan->sync_err_pdo_os], chan->sync_err_pdo_bp);
-
-    // update value
-    value = EC_READ_S16(&pd[chan->val_pdo_os]) & mask;
-    *(chan->raw_val) = value;
-    *(chan->val) = *(chan->bias) + *(chan->scale) * (double)value * ((double)1 / (double)mask);
-  }
-}
-
-/// @brief Read data from a 16-bit analog temperature sensor.
-///
-/// This applies different transform logic to return a temperature rather than a generic floating point value.
-static void lcec_el3xxx_read_temp(struct lcec_slave *slave, long period) {
-  lcec_master_t *master = slave->master;
-  lcec_el3xxx_data_t *hal_data = (lcec_el3xxx_data_t *)slave->hal_data;
-  uint8_t *pd = master->process_data;
-  int i;
-  lcec_el3xxx_chan_t *chan;
-  int32_t value;
-
-  // wait for slave to be operational
-  if (!slave->state.operational) {
-    return;
-  }
-
-  // check inputs
-  for (i = 0; i < hal_data->channels; i++) {
-    chan = &hal_data->chans[i];
-
-    // update state
-    // update state
-    *(chan->overrange) = EC_READ_BIT(&pd[chan->ovr_pdo_os], chan->ovr_pdo_bp);
-    *(chan->underrange) = EC_READ_BIT(&pd[chan->udr_pdo_os], chan->udr_pdo_bp);
-    *(chan->error) = EC_READ_BIT(&pd[chan->error_pdo_os], chan->error_pdo_bp);
-
-    // update value
-    if (chan->is_unsigned) {
-      value = EC_READ_U16(&pd[chan->val_pdo_os]);
-    } else {
-      value = EC_READ_S16(&pd[chan->val_pdo_os]);
-    }
-    *(chan->raw_val) = value;
-    *(chan->val) = (double)value * *(chan->scale);
-  }
+  lcec_ain_read_all(slave, hal_data);
 }
 
 /// @brief Match the sensor_type in modparams and return the definition
@@ -538,6 +317,26 @@ static const temp_sensor_t *sensor_type(char *sensortype) {
   return NULL;
 }
 
+/// @brief Set the sensor type for a channel.
+static int set_sensor_type(lcec_slave_t *slave, char *sensortype, lcec_class_ain_channel_t *chan, int idx, int sidx) {
+  temp_sensor_t const *sensor;
+
+  sensor = sensor_type(sensortype);
+  if (sensor != NULL) {
+    *(chan->scale) = sensor->scale;
+    chan->is_unsigned = sensor->is_unsigned;
+    if (lcec_write_sdo16(slave, idx, sidx, sensor->value) != 0) {
+      rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure sensor for slave %s.%s\n", slave->master->name, slave->name);
+      return -1;
+    }
+  } else {
+    rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown sensor type \"%s\"\n", sensortype);
+    return -1;
+  }
+
+  return 0;
+}
+
 /// @brief Match the sensor resolutiuon in modparams and return the settings for that resolution.
 static const temp_resolution_t *sensor_resolution(char *sensorresolution) {
   temp_resolution_t const *res;
@@ -551,6 +350,24 @@ static const temp_resolution_t *sensor_resolution(char *sensorresolution) {
   return NULL;
 }
 
+/// @brief Set the resolution for a channel.
+static int set_resolution(lcec_slave_t *slave, char *resolution_name, lcec_class_ain_channel_t *chan, int idx, int sidx) {
+  temp_resolution_t const *resolution;
+
+  resolution = sensor_resolution(resolution_name);
+  if (resolution != NULL) {
+    *(chan->scale) = *(chan->scale) * resolution->scale_multiplier;
+    if (lcec_write_sdo8(slave, idx, sidx, resolution->value) != 0) {
+      rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure slave %s.%s sdo resolution!\n", slave->master->name, slave->name);
+      return -1;
+    }
+  } else {
+    rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown resolution \"%s\"\n", resolution_name);
+    return -1;
+  }
+  return 0;
+}
+
 /// @brief Match the sensor wire configuration in modparams and return the settings for that number of wires.
 static const temp_wires_t *sensor_wires(char *sensorwires) {
   temp_wires_t const *wires;
@@ -562,4 +379,21 @@ static const temp_wires_t *sensor_wires(char *sensorwires) {
   }
 
   return NULL;
+}
+
+/// @brief Set the wire count for a channel.
+static int set_wires(lcec_slave_t *slave, char *wires_name, lcec_class_ain_channel_t *chan, int idx, int sidx) {
+  temp_wires_t const *wires;
+
+  wires = sensor_wires(wires_name);
+  if (wires != NULL) {
+    if (lcec_write_sdo16(slave, idx, sidx, wires->value) != 0) {
+      rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "failed to configure slave %s.%s sdo wires!\n", slave->master->name, slave->name);
+      return -1;
+    }
+  } else {
+    rtapi_print_msg(RTAPI_MSG_ERR, LCEC_MSG_PFX "unknown wire setting \"%s\"\n", wires_name);
+    return -1;
+  }
+  return 0;
 }
